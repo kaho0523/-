@@ -344,10 +344,10 @@ export function SettingsClient() {
                     {fetchingTrains ? (
                       <>
                         <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                        OpenAIで検索中…
+                        ウェブ検索中…
                       </>
                     ) : (
-                      '🤖 今日のダイヤをOpenAIで取得'
+                      '🔍 今日のダイヤをウェブ検索で取得'
                     )}
                   </button>
                   <button

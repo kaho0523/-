@@ -309,7 +309,7 @@ export function HomeClient() {
                       取得中
                     </>
                   ) : (
-                    '🤖 今日のダイヤ'
+                    '🔍 今日のダイヤ'
                   )}
                 </button>
               </div>

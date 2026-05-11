@@ -119,37 +119,42 @@ async function fetchGoogleMapsTransit(
   return { result: { trains: sorted, windowStart: sorted[0].time, windowEnd: sorted[sorted.length - 1].time }, error: '' }
 }
 
-// OpenAI フォールバック
-async function fetchOpenAI(
+// gpt-4.1-nano + ウェブ検索で電車時刻を取得
+async function fetchOpenAIWebSearch(
   homeStation: string,
   destinationStation: string,
   latestArrivalAtDest: string,
   latestDepartFromHome: string,
-  journeyTime: number,
   apiKey: string
 ): Promise<{ trains: TrainTime[]; windowStart: string; windowEnd: string } | null> {
-  const prompt = `${homeStation}駅から${destinationStation}駅への電車を教えてください。
-所要時間は約${journeyTime}分です。${destinationStation}駅に${latestArrivalAtDest}までに到着できる電車のうち、到着時刻がギリギリの3本を、${homeStation}駅の出発時刻で答えてください。
+  const today = new Date().toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' })
+  const prompt = `今日（${today}）の${homeStation}駅から${destinationStation}駅への電車の時刻表をウェブで検索してください。
+${destinationStation}駅に${latestArrivalAtDest}までに到着できる電車のうち、出発時刻が${latestDepartFromHome}以前でギリギリの3本を、${homeStation}駅の出発時刻で答えてください。
 
-以下のJSON形式だけで回答してください。説明文不要。timeは${homeStation}駅の出発時刻です。
+必ず以下のJSON形式だけで回答してください。説明文不要。timeは${homeStation}駅の出発時刻（HH:MM形式）です。
 {"trains":[{"time":"09:52","type":"急行"},{"time":"09:40","type":"各停"},{"time":"09:28","type":"各停"}]}`
 
   try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    const res = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
+        model: 'gpt-4.5-nano',
+        tools: [{ type: 'web_search_preview' }],
+        input: prompt,
       }),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(30_000),
     })
     if (!res.ok) return null
 
     const data = await res.json()
-    const rawText: string = data.choices?.[0]?.message?.content ?? ''
+    // Responses APIのレスポンス形式: output[].content[].text
+    const rawText: string = (data.output ?? [])
+      .flatMap((o: { type: string; content?: Array<{ type: string; text?: string }> }) =>
+        o.type === 'message' ? (o.content ?? []).filter(c => c.type === 'output_text').map(c => c.text ?? '') : []
+      )
+      .join('')
+
     const jsonMatch = rawText.match(/\{[\s\S]*?"trains"\s*:\s*\[[\s\S]*?\][\s\S]*?\}/)
     if (!jsonMatch) return null
 
@@ -161,7 +166,7 @@ async function fetchOpenAI(
         return isValidTime(normalized) && normalized <= latestDepartFromHome
       })
       .map((t, i) => ({
-        id: `openai-${Date.now()}-${i}`,
+        id: `openai-ws-${Date.now()}-${i}`,
         time: normalizeTime(t.time!.replace('：', ':')),
         label: t.type ?? '',
       }))
@@ -205,19 +210,19 @@ export async function GET(request: NextRequest) {
     console.error('[Google Maps] 失敗:', googleError)
   }
 
-  // ② OpenAI フォールバック
+  // ② gpt-4.1-nano + ウェブ検索
   const openaiKey = request.headers.get('x-openai-api-key') || process.env.OPEN_AI_KEY
   if (openaiKey) {
-    const result = await fetchOpenAI(
-      homeStation, destinationStation, latestArrivalAtDest, latestDepartFromHome, journeyTime, openaiKey
+    const result = await fetchOpenAIWebSearch(
+      homeStation, destinationStation, latestArrivalAtDest, latestDepartFromHome, openaiKey
     )
     if (result) {
-      return NextResponse.json({ ...result, model: 'gpt-4o-mini (参考値)' })
+      return NextResponse.json({ ...result, model: 'gpt-4.1-nano (ウェブ検索)' })
     }
   }
 
   return NextResponse.json(
-    { error: 'GOOGLE_MAPS_API_KEY が設定されていません。設定画面で手動入力してください。', trains: [] },
+    { error: '電車時刻を取得できませんでした。手動で入力してください。', trains: [] },
     { status: 503 }
   )
 }
