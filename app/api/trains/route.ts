@@ -119,7 +119,7 @@ async function fetchGoogleMapsTransit(
   return { result: { trains: sorted, windowStart: sorted[0].time, windowEnd: sorted[sorted.length - 1].time }, error: '' }
 }
 
-// gpt-4.1-nano + ウェブ検索で電車時刻を取得
+// gpt-5.4-nano + ウェブ検索で電車時刻を取得
 async function fetchOpenAIWebSearch(
   homeStation: string,
   destinationStation: string,
@@ -139,8 +139,8 @@ ${destinationStation}駅に${latestArrivalAtDest}までに到着できる電車�
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
-        model: 'gpt-4.5-nano',
-        tools: [{ type: 'web_search_preview' }],
+        model: 'gpt-5.4-nano',
+        tools: [{ type: 'web_search' }],
         input: prompt,
       }),
       signal: AbortSignal.timeout(30_000),
@@ -210,14 +210,14 @@ export async function GET(request: NextRequest) {
     console.error('[Google Maps] 失敗:', googleError)
   }
 
-  // ② gpt-4.1-nano + ウェブ検索
+  // ② gpt-5.4-nano + ウェブ検索
   const openaiKey = request.headers.get('x-openai-api-key') || process.env.OPEN_AI_KEY
   if (openaiKey) {
     const result = await fetchOpenAIWebSearch(
       homeStation, destinationStation, latestArrivalAtDest, latestDepartFromHome, openaiKey
     )
     if (result) {
-      return NextResponse.json({ ...result, model: 'gpt-4.1-nano (ウェブ検索)' })
+      return NextResponse.json({ ...result, model: 'gpt-5.4-nano (ウェブ検索)' })
     }
   }
 
