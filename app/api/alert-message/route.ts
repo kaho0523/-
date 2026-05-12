@@ -11,12 +11,12 @@ export async function POST(request: NextRequest) {
       'https://api.openai.com/v1/chat/completions',
       {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`
         },
-        body: JSON.stringify({ 
-          model: 'gpt-4o-mini',
+        body: JSON.stringify({
+          model: 'gpt-5.4-nano',
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.7
         }),

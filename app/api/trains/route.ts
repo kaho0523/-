@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { TrainTime } from '@/lib/types'
 
-export const maxDuration = 30
+export const maxDuration = 60
+
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000
 
 function toHHMM(min: number): string {
   return `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`
@@ -11,171 +13,120 @@ function isValidTime(t: string): boolean {
   return /^\d{2}:\d{2}$/.test(t)
 }
 
-function normalizeTime(t: string): string {
-  const [h, m] = t.split(':')
-  return `${h.padStart(2, '0')}:${m.padStart(2, '0')}`
+// JST の "HH:MM" → UTC の Date（過去なら翌日）
+function jstHHMMToUTCDate(hhmm: string): Date {
+  const [h, m] = hhmm.split(':').map(Number)
+  const jstDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Tokyo' })
+  const [year, month, day] = jstDateStr.split('-').map(Number)
+  const utcMs = Date.UTC(year, month - 1, day, h, m, 0) - JST_OFFSET_MS
+  const target = new Date(utcMs)
+  if (target.getTime() < Date.now()) target.setUTCDate(target.getUTCDate() + 1)
+  return target
 }
 
-// Google Maps Directions API で3本分を順番に取得
-async function fetchGoogleMapsTransitWithError(
+// Yahoo!乗換案内 print ページから出発時刻・到着時刻・路線名を取得
+function parsePrintPage(html: string): { deptTime: string; arrTime: string; lineName: string } | null {
+  // summary: "07:50<!-- -->発→ ... class="mark">09:06<!-- -->着"
+  const deptMatch = html.match(/(\d{1,2}):(\d{2})(?:<!-- -->)?発/)
+  const arrMatch = html.match(/class="mark"[^>]*>(\d{1,2}):(\d{2})(?:<!-- -->)?着/)
+  if (!deptMatch || !arrMatch) return null
+
+  const deptTime = `${deptMatch[1].padStart(2, '0')}:${deptMatch[2]}`
+  const arrTime = `${arrMatch[1].padStart(2, '0')}:${arrMatch[2]}`
+  if (!isValidTime(deptTime) || !isValidTime(arrTime)) return null
+
+  // 最初の路線名 (JSON 埋め込み部分を除く)
+  const lineMatch = html.match(/(?:ＪＲ|東急|小田急|京王|都営|メトロ|東京メトロ|西武|東武|京急|京成|相鉄|横浜)[^\s<",]{0,40}/)
+  const lineName = lineMatch ? lineMatch[0].trim() : ''
+
+  return { deptTime, arrTime, lineName }
+}
+
+async function fetchYahooScrape(
   homeStation: string,
   destinationStation: string,
   latestArrivalAtDest: string,
   latestDepartFromHome: string,
-  apiKey: string
 ): Promise<{ result: { trains: TrainTime[]; windowStart: string; windowEnd: string } | null; error: string }> {
-  const inner = await fetchGoogleMapsTransit(homeStation, destinationStation, latestArrivalAtDest, latestDepartFromHome, apiKey)
-  return { result: inner.result, error: inner.error }
-}
-
-async function fetchGoogleMapsTransit(
-  homeStation: string,
-  destinationStation: string,
-  latestArrivalAtDest: string,
-  latestDepartFromHome: string,
-  apiKey: string
-): Promise<{ result: { trains: TrainTime[]; windowStart: string; windowEnd: string } | null; error: string }> {
-  const [ah, am] = latestArrivalAtDest.split(':').map(Number)
-  const baseDate = new Date()
-  baseDate.setHours(ah, am, 0, 0)
-  // すでに過去の時刻なら翌日として扱う
-  if (baseDate.getTime() < Date.now()) {
-    baseDate.setDate(baseDate.getDate() + 1)
-  }
+  // 出発上限の2時間前から順方向に検索
+  const deadlineDeptDate = jstHHMMToUTCDate(latestDepartFromHome)
+  let currentDate = new Date(deadlineDeptDate.getTime() - 2 * 60 * 60 * 1000)
 
   const trains: TrainTime[] = []
   const seen = new Set<string>()
-  let currentArrivalMs = baseDate.getTime()
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const arrivalTimestamp = Math.floor(currentArrivalMs / 1000)
+  for (let attempt = 0; attempt < 15; attempt++) {
+    const jstMs = currentDate.getTime() + JST_OFFSET_MS
+    const jst = new Date(jstMs)
 
-    const url = new URL('https://maps.googleapis.com/maps/api/directions/json')
-    url.searchParams.set('origin', homeStation + '駅')
-    url.searchParams.set('destination', destinationStation + '駅')
-    url.searchParams.set('mode', 'transit')
-    url.searchParams.set('transit_mode', 'rail')
-    url.searchParams.set('arrival_time', String(arrivalTimestamp))
-    url.searchParams.set('language', 'ja')
-    url.searchParams.set('key', apiKey)
+    const params = new URLSearchParams({
+      from: homeStation.trim(),
+      to: destinationStation.trim(),
+      y: String(jst.getUTCFullYear()),
+      m: String(jst.getUTCMonth() + 1).padStart(2, '0'),
+      d: String(jst.getUTCDate()).padStart(2, '0'),
+      hh: String(jst.getUTCHours()).padStart(2, '0'),
+      m1: String(Math.floor(jst.getUTCMinutes() / 10)),
+      m2: String(jst.getUTCMinutes() % 10),
+      type: '1',  // 出発時刻指定
+      ticket: 'ic',
+      expkind: '1',
+      ws: '2',
+      s: '0',
+    })
 
-    let data: {
-      status: string
-      error_message?: string
-      routes?: Array<{
-        legs?: Array<{
-          arrival_time?: { value: number }
-          steps?: Array<{
-            travel_mode: string
-            transit_details?: {
-              departure_time?: { value: number }
-              line?: { short_name?: string; name?: string }
-            }
-          }>
-        }>
-      }>
-    }
+    const url = `https://transit.yahoo.co.jp/search/print?${params}`
+    console.log(`[Yahoo] attempt=${attempt} url=${url}`)
 
+    let html = ''
     try {
-      const res = await fetch(url.toString(), { signal: AbortSignal.timeout(8000) })
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept-Language': 'ja-JP,ja;q=0.9',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
+        },
+        signal: AbortSignal.timeout(8000),
+      })
+      html = await res.text()
       if (!res.ok) return { result: null, error: `HTTP ${res.status}` }
-      data = await res.json()
-    } catch (e) { return { result: null, error: String(e) } }
-
-    if (data.status !== 'OK' || !data.routes?.length) {
-      return { result: null, error: `status=${data.status} ${data.error_message ?? ''}` }
+    } catch (e) {
+      return { result: null, error: String(e) }
     }
 
-    const leg = data.routes[0].legs?.[0]
-    if (!leg) break
+    const route = parsePrintPage(html)
+    if (!route) break
 
-    const arrivalAtDestTs = leg.arrival_time?.value
-    if (!arrivalAtDestTs) break
+    const { deptTime, arrTime, lineName } = route
+    console.log(`[Yahoo] attempt=${attempt} dept=${deptTime} arr=${arrTime} line=${lineName}`)
 
-    // 最初のTRANSITステップの出発時刻 = 出発駅の乗車時刻
-    let deptTime: string | null = null
-    let lineName = ''
-    for (const step of leg.steps ?? []) {
-      if (step.travel_mode === 'TRANSIT') {
-        const deptTs = step.transit_details?.departure_time?.value
-        if (!deptTs) continue
-        const d = new Date(deptTs * 1000)
-        deptTime = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-        lineName = step.transit_details?.line?.short_name ?? step.transit_details?.line?.name ?? ''
-        break
-      }
+    if (seen.has(deptTime)) {
+      currentDate = new Date(currentDate.getTime() + 60_000)
+      continue
     }
 
-    if (!deptTime || !isValidTime(deptTime) || deptTime > latestDepartFromHome || seen.has(deptTime)) break
-    seen.add(deptTime)
-    trains.push({ id: `google-${Date.now()}-${attempt}`, time: deptTime, label: lineName })
+    // 出発上限を超えたら終了
+    if (deptTime > latestDepartFromHome) break
 
-    // 次のループ: この電車が目的地に着く1分前を上限として再検索 → 1本前の電車が返る
-    currentArrivalMs = arrivalAtDestTs * 1000 - 60_000
+    // 到着時刻が間に合う場合のみ追加
+    if (arrTime <= latestArrivalAtDest) {
+      seen.add(deptTime)
+      trains.push({ id: `yahoo-${trains.length}`, time: deptTime, label: lineName })
+    }
+
+    // 次のリクエスト: 1分後の出発時刻から検索
+    const [dh, dm] = deptTime.split(':').map(Number)
+    const deptJstMs = Date.UTC(jst.getUTCFullYear(), jst.getUTCMonth(), jst.getUTCDate(), dh, dm, 0)
+    currentDate = new Date(deptJstMs - JST_OFFSET_MS + 60_000)
   }
 
   if (trains.length === 0) return { result: null, error: '電車が見つかりませんでした' }
+
   const sorted = trains.sort((a, b) => a.time.localeCompare(b.time)).slice(-3)
-  return { result: { trains: sorted, windowStart: sorted[0].time, windowEnd: sorted[sorted.length - 1].time }, error: '' }
-}
-
-// gpt-5.4-mini + ウェブ検索で電車時刻を取得
-async function fetchOpenAIWebSearch(
-  homeStation: string,
-  destinationStation: string,
-  latestArrivalAtDest: string,
-  latestDepartFromHome: string,
-  apiKey: string
-): Promise<{ trains: TrainTime[]; windowStart: string; windowEnd: string } | null> {
-  const today = new Date().toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' })
-  const prompt = `今日（${today}）の${homeStation}駅から${destinationStation}駅への電車の時刻表をウェブで検索してください。
-${destinationStation}駅に${latestArrivalAtDest}までに到着できる電車のうち、出発時刻が${latestDepartFromHome}以前でギリギリの3本を、${homeStation}駅の出発時刻で答えてください。
-
-必ず以下のJSON形式だけで回答してください。説明文不要。timeは${homeStation}駅の出発時刻（HH:MM形式）です。
-{"trains":[{"time":"09:52","type":"急行"},{"time":"09:40","type":"各停"},{"time":"09:28","type":"各停"}]}`
-
-  try {
-    const res = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: 'gpt-5.4-mini',
-        tools: [{ type: 'web_search' }],
-        input: prompt,
-      }),
-      signal: AbortSignal.timeout(30_000),
-    })
-    if (!res.ok) return null
-
-    const data = await res.json()
-    // Responses APIのレスポンス形式: output[].content[].text
-    const rawText: string = (data.output ?? [])
-      .flatMap((o: { type: string; content?: Array<{ type: string; text?: string }> }) =>
-        o.type === 'message' ? (o.content ?? []).filter(c => c.type === 'output_text').map(c => c.text ?? '') : []
-      )
-      .join('')
-
-    const jsonMatch = rawText.match(/\{[\s\S]*?"trains"\s*:\s*\[[\s\S]*?\][\s\S]*?\}/)
-    if (!jsonMatch) return null
-
-    const parsed = JSON.parse(jsonMatch[0]) as { trains?: Array<{ time?: string; type?: string }> }
-    const trains: TrainTime[] = (parsed.trains ?? [])
-      .filter((t) => {
-        if (!t.time) return false
-        const normalized = normalizeTime(t.time.replace('：', ':'))
-        return isValidTime(normalized) && normalized <= latestDepartFromHome
-      })
-      .map((t, i) => ({
-        id: `openai-ws-${Date.now()}-${i}`,
-        time: normalizeTime(t.time!.replace('：', ':')),
-        label: t.type ?? '',
-      }))
-      .sort((a, b) => a.time.localeCompare(b.time))
-      .slice(-3)
-
-    if (trains.length === 0) return null
-    return { trains, windowStart: trains[0].time, windowEnd: trains[trains.length - 1].time }
-  } catch { return null }
+  return {
+    result: { trains: sorted, windowStart: sorted[0].time, windowEnd: sorted[sorted.length - 1].time },
+    error: '',
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -198,31 +149,13 @@ export async function GET(request: NextRequest) {
   const latestArrivalAtDest = toHHMM(latestArrivalAtDestMin)
   const latestDepartFromHome = toHHMM(latestDepartFromHomeMin)
 
-  // ① Google Maps Directions API（精度高・推奨）
-  const googleKey = process.env.GOOGLE_MAPS_API_KEY
-  if (googleKey) {
-    const { result: googleResult, error: googleError } = await fetchGoogleMapsTransitWithError(
-      homeStation, destinationStation, latestArrivalAtDest, latestDepartFromHome, googleKey
-    )
-    if (googleResult) {
-      return NextResponse.json({ ...googleResult, model: 'Google Maps' })
-    }
-    console.error('[Google Maps] 失敗:', googleError)
-  }
-
-  // ② gpt-5.4-mini + ウェブ検索
-  const openaiKey = request.headers.get('x-openai-api-key') || process.env.OPEN_AI_KEY
-  if (openaiKey) {
-    const result = await fetchOpenAIWebSearch(
-      homeStation, destinationStation, latestArrivalAtDest, latestDepartFromHome, openaiKey
-    )
-    if (result) {
-      return NextResponse.json({ ...result, model: 'gpt-5.4-mini (ウェブ検索)' })
-    }
-  }
-
-  return NextResponse.json(
-    { error: '電車時刻を取得できませんでした。手動で入力してください。', trains: [] },
-    { status: 503 }
+  const { result, error } = await fetchYahooScrape(
+    homeStation, destinationStation, latestArrivalAtDest, latestDepartFromHome
   )
+  if (result) {
+    return NextResponse.json({ ...result, model: 'Yahoo!乗換案内' })
+  }
+
+  console.error('[Yahoo] 失敗:', error)
+  return NextResponse.json({ error: `電車時刻を取得できませんでした: ${error}`, trains: [] }, { status: 503 })
 }

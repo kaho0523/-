@@ -30,7 +30,7 @@ export function HomeClient() {
   const [schedule, setSchedule] = useState<ScheduleResult | null>(null)
   const [alarm, setAlarm] = useState<AlarmState>(DEFAULT_ALARM_STATE)
   const [now, setNow] = useState(new Date())
-  const [geminiMsg, setGeminiMsg] = useState<string | null>(null)
+  const [alertMsg, setAlertMsg] = useState<string | null>(null)
   const [trainFetching, setTrainFetching] = useState(false)
   const [trainFetchResult, setTrainFetchResult] = useState<string | null>(null)
   const [autoLoaded, setAutoLoaded] = useState<string | null>(null)
@@ -90,26 +90,26 @@ export function HomeClient() {
   // AIメッセージ取得
   useEffect(() => {
     if (!schedule || !settings) return
-    const fetchGemini = async () => {
+    const fetchAlertMessage = async () => {
       try {
         const prompt = `あなたは遅刻防止アシスタントです。以下の状況を踏まえて、ユーザーに向けた短い日本語メッセージを1文で生成してください。
 危険度: ${schedule.riskLevel}
 出発まで: ${Math.round(schedule.minutesUntilLeave)}分`
-        const res = await fetch('/api/gemini', {
+        const res = await fetch('/api/alert-message', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prompt }),
         })
         if (res.ok) {
           const data = await res.json()
-          if (data.message) setGeminiMsg(data.message)
+          if (data.message) setAlertMsg(data.message)
         }
       } catch {
         // 無視
       }
     }
     if (schedule.riskLevel !== 'SAFE') {
-      fetchGemini()
+      fetchAlertMessage()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schedule?.riskLevel])
@@ -334,9 +334,9 @@ export function HomeClient() {
               </div>
             )}
 
-            {geminiMsg && (
+            {alertMsg && (
               <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-sm text-blue-800">
-                💬 {geminiMsg}
+                💬 {alertMsg}
               </div>
             )}
 

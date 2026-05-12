@@ -26,15 +26,23 @@ npm run dev
 
 | 変数名 | 用途 | 必須 |
 |--------|------|------|
+| `OPEN_AI_KEY` | AIアラートメッセージ生成（gpt-5.4-nano） | 任意 |
 | `ODPT_API_KEY` | 東京圏リアルタイム遅延情報 | 任意 |
-| `GEMINI_API_KEY` | AI状況説明メッセージ | 任意 |
 
-どちらも未設定の場合、モックデータで動作します。
+電車時刻の自動取得は **Yahoo!乗換案内のウェブスクレイピング**で行うため、APIキー不要です。  
+`OPEN_AI_KEY` が未設定の場合、アラートメッセージは表示されません。
 
 ## APIキーの取得
 
+- **OpenAI**: https://platform.openai.com/api-keys
 - **ODPT**: https://developer-tokyometro.jp/ （無料）
-- **Gemini**: https://aistudio.google.com/app/apikey （無料枠あり）
+
+## API構成
+
+| エンドポイント | 方式 | 用途 |
+|---|---|---|
+| `/api/trains` | Yahoo!乗換案内 スクレイピング | 電車時刻の取得（APIキー不要） |
+| `/api/alert-message` | OpenAI gpt-5.4-nano | アラートメッセージ生成 |
 
 ## 時刻計算ロジック
 
